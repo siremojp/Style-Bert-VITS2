@@ -35,7 +35,7 @@ from style_bert_vits2.nlp.japanese import pyopenjtalk_worker as pyopenjtalk
 from style_bert_vits2.nlp.japanese.user_dict import update_dict
 from style_bert_vits2.tts_model import TTSModel, TTSModelHolder
 
-app = modal.App("style-bert-vits2-server")
+app = modal.App("style-bert-vits2-server-A10")
 configs_mount = modal.Mount.from_local_dir(".", remote_path="/root/.")
 image = (
     Image.debian_slim()
@@ -68,7 +68,7 @@ image = (
 model_loading_sequence = ["ima_004_whisperE001", "ima_blend_004_tsukuE015", "ima_blend_004_tsukuN004"]
 
 
-@app.function(image=image, gpu=[modal.gpu.L4()], container_idle_timeout=300)
+@app.function(image=image, gpu=[modal.gpu.A10G()], container_idle_timeout=300)
 @modal.asgi_app()
 def create_app():
     config = get_config()
