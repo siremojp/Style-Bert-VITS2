@@ -15,6 +15,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from modal import Image
 from scipy.io import wavfile
+import nltk
+nltk.download('punkt')
+from nltk.tokenize import sent_tokenize
 
 from config import get_config
 from style_bert_vits2.constants import (
@@ -132,7 +135,7 @@ def create_app():
             detail=[dict(type="invalid_params", msg=msg, loc=["query", param])],
         )
 
-    @fastapi_app.websocket("/voice/ws")
+    @fastapi_app.websocket("/voice")
     async def voice(websocket: WebSocket, 
                     text: str = Query(...), 
                     encoding: Optional[str] = Query(None), 
@@ -156,16 +159,16 @@ def create_app():
         await websocket.accept()
         try:
             if model_id >= len(loaded_models):
-                await websocket.send_json({"error": f"model_id={model_id} not found"})
+                await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason=f"model_id={model_id} not found")
                 return
 
             if model_name:
                 model_ids = [i for i, model in enumerate(loaded_models) if model.config_path.parent.name == model_name]
                 if not model_ids:
-                    await websocket.send_json({"error": f"model_name={model_name} not found"})
+                    await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason=f"model_name={model_name} not found")
                     return
                 if len(model_ids) > 1:
-                    await websocket.send_json({"error": f"model_name={model_name} is ambiguous"})
+                    await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason=f"model_name={model_name} is ambiguous")
                     return
                 model_id = model_ids[0]
 
@@ -173,46 +176,52 @@ def create_app():
 
             if speaker_name is None:
                 if speaker_id not in model.id2spk.keys():
-                    await websocket.send_json({"error": f"speaker_id={speaker_id} not found"})
+                    await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason=f"speaker_id={speaker_id} not found")
                     return
             else:
                 if speaker_name not in model.spk2id.keys():
-                    await websocket.send_json({"error": f"speaker_name={speaker_name} not found"})
+                    await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason=f"speaker_name={speaker_name} not found")
                     return
                 speaker_id = model.spk2id[speaker_name]
 
             if style not in model.style2id.keys():
-                await websocket.send_json({"error": f"style={style} not found"})
+                await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason=f"style={style} not found")
                 return
 
             if encoding is not None:
                 text = unquote(text, encoding=encoding)
+    
+            chunks = sent_tokenize(text)
+            first_chunk = True
+            for chunk in chunks:
+                sr, audio = model.infer(
+                    text=chunk,
+                    language=language,
+                    speaker_id=speaker_id,
+                    reference_audio_path=reference_audio_path,
+                    sdp_ratio=sdp_ratio,
+                    noise=noise,
+                    noise_w=noisew,
+                    length=length,
+                    line_split=auto_split,
+                    split_interval=split_interval,
+                    assist_text=assist_text,
+                    assist_text_weight=assist_text_weight,
+                    use_assist_text=bool(assist_text),
+                    style=style,
+                    style_weight=style_weight,
+                )
 
-            sr, audio = model.infer(
-                text=text,
-                language=language,
-                speaker_id=speaker_id,
-                reference_audio_path=reference_audio_path,
-                sdp_ratio=sdp_ratio,
-                noise=noise,
-                noise_w=noisew,
-                length=length,
-                line_split=auto_split,
-                split_interval=split_interval,
-                assist_text=assist_text,
-                assist_text_weight=assist_text_weight,
-                use_assist_text=bool(assist_text),
-                style=style,
-                style_weight=style_weight,
-            )
-
-            logger.success("Audio data generated and sent successfully")
-            with BytesIO() as wavContent:
-                wavfile.write(wavContent, sr, audio)
-                await websocket.send_bytes(wavContent.getvalue())
+                with BytesIO() as wavContent:
+                    if first_chunk:
+                        wavfile.write(wavContent, sr, audio)
+                        first_chunk = False
+                    else:
+                        wavContent.write(audio.tobytes())
+                    await websocket.send_bytes(wavContent.getvalue())
         except Exception as e:
             logger.error(f"Error processing request: {e}")
-            await websocket.send_json({"error": str(e)})
+            await websocket.close(code=status.WS_1011_INTERNAL_ERROR, reason=str(e))
         finally:
             await websocket.close()
             
