@@ -10,11 +10,14 @@ import modal
 import modal.gpu
 import psutil
 import torch
-from fastapi import FastAPI, HTTPException, Query, Request, status
+from fastapi import FastAPI, HTTPException, Query, Request, status, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from modal import Image
 from scipy.io import wavfile
+import nltk
+nltk.download('punkt')
+from nltk.tokenize import sent_tokenize
 
 from config import get_config
 from style_bert_vits2.constants import (
@@ -132,6 +135,96 @@ def create_app():
             detail=[dict(type="invalid_params", msg=msg, loc=["query", param])],
         )
 
+    @fastapi_app.websocket("/voice")
+    async def voice(websocket: WebSocket, 
+                    text: str = Query(...), 
+                    encoding: Optional[str] = Query(None), 
+                    model_name: Optional[str] = Query(None), 
+                    model_id: int = Query(0), 
+                    speaker_name: Optional[str] = Query(None), 
+                    speaker_id: int = Query(0), 
+                    sdp_ratio: float = Query(DEFAULT_SDP_RATIO), 
+                    noise: float = Query(DEFAULT_NOISE), 
+                    noisew: float = Query(DEFAULT_NOISEW), 
+                    length: float = Query(DEFAULT_LENGTH), 
+                    language: str = Query(ln), 
+                    auto_split: bool = Query(DEFAULT_LINE_SPLIT), 
+                    split_interval: float = Query(DEFAULT_SPLIT_INTERVAL), 
+                    assist_text: Optional[str] = Query(None), 
+                    assist_text_weight: float = Query(DEFAULT_ASSIST_TEXT_WEIGHT), 
+                    style: str = Query(DEFAULT_STYLE), 
+                    style_weight: float = Query(DEFAULT_STYLE_WEIGHT), 
+                    reference_audio_path: Optional[str] = Query(None)):
+        
+        await websocket.accept()
+        try:
+            if model_id >= len(loaded_models):
+                await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason=f"model_id={model_id} not found")
+                return
+
+            if model_name:
+                model_ids = [i for i, model in enumerate(loaded_models) if model.config_path.parent.name == model_name]
+                if not model_ids:
+                    await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason=f"model_name={model_name} not found")
+                    return
+                if len(model_ids) > 1:
+                    await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason=f"model_name={model_name} is ambiguous")
+                    return
+                model_id = model_ids[0]
+
+            model = loaded_models[model_id]
+
+            if speaker_name is None:
+                if speaker_id not in model.id2spk.keys():
+                    await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason=f"speaker_id={speaker_id} not found")
+                    return
+            else:
+                if speaker_name not in model.spk2id.keys():
+                    await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason=f"speaker_name={speaker_name} not found")
+                    return
+                speaker_id = model.spk2id[speaker_name]
+
+            if style not in model.style2id.keys():
+                await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason=f"style={style} not found")
+                return
+
+            if encoding is not None:
+                text = unquote(text, encoding=encoding)
+    
+            chunks = sent_tokenize(text)
+            first_chunk = True
+            for chunk in chunks:
+                sr, audio = model.infer(
+                    text=chunk,
+                    language=language,
+                    speaker_id=speaker_id,
+                    reference_audio_path=reference_audio_path,
+                    sdp_ratio=sdp_ratio,
+                    noise=noise,
+                    noise_w=noisew,
+                    length=length,
+                    line_split=auto_split,
+                    split_interval=split_interval,
+                    assist_text=assist_text,
+                    assist_text_weight=assist_text_weight,
+                    use_assist_text=bool(assist_text),
+                    style=style,
+                    style_weight=style_weight,
+                )
+
+                with BytesIO() as wavContent:
+                    if first_chunk:
+                        wavfile.write(wavContent, sr, audio)
+                        first_chunk = False
+                    else:
+                        wavContent.write(audio.tobytes())
+                    await websocket.send_bytes(wavContent.getvalue())
+        except Exception as e:
+            logger.error(f"Error processing request: {e}")
+            await websocket.close(code=status.WS_1011_INTERNAL_ERROR, reason=str(e))
+        finally:
+            await websocket.close()
+            
     @fastapi_app.api_route("/voice", methods=["GET", "POST"], response_class=AudioResponse)
     async def voice(
         request: Request,
