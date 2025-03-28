@@ -1,5 +1,6 @@
 import os
 import sys
+import base64
 import json
 from io import BytesIO
 from pathlib import Path
@@ -218,7 +219,11 @@ def create_app():
 
                     with BytesIO() as wavContent:
                         wavfile.write(wavContent, sr, audio)
-                        await websocket.send_bytes(wavContent.getvalue())
+                        wav_bytes = wavContent.getvalue()
+
+                    audio_base64 = base64.b64encode(wav_bytes).decode('utf-8')
+                    response = json.dumps({"text": chunk, "audio": audio_base64})
+                    await websocket.send_text(response)
 
                 # Notify client that audio is fully sent
                 await websocket.send_json({"end": True})
